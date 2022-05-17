@@ -120,7 +120,7 @@ public class DefaultPermissionsResolver implements PermissionsResolver {
         }
 
         if (!roles.isEmpty()) {
-          permission.addResources(provider.getAllRestricted(userId, roles, permission.isAdmin()));
+          permission.addResources(provider.getAllRestricted(roles, permission.isAdmin()));
         }
       } catch (ProviderException pe) {
         throw new PermissionResolutionException(
@@ -192,24 +192,25 @@ public class DefaultPermissionsResolver implements PermissionsResolver {
     return userToRoles.entrySet().stream()
         .map(
             entry -> {
-              String userId = entry.getKey();
-              Set<Role> userRoles = new HashSet<>(entry.getValue());
+              final String username = entry.getKey();
+              final Set<Role> userRoles = new HashSet<>(entry.getValue());
+              final boolean isAdmin = resolveAdminRole(userRoles);
 
               return new UserPermission()
-                  .setId(userId)
+                  .setId(username)
                   .setRoles(userRoles)
-                  .setAdmin(resolveAdminRole(userRoles))
-                  .addResources(getResources(userId, userRoles, resolveAdminRole(userRoles)));
+                  .setAdmin(isAdmin)
+                  .addResources(getResources(userRoles, isAdmin));
             })
         .collect(Collectors.toMap(UserPermission::getId, Function.identity()));
   }
 
-  private Set<Resource> getResources(String userId, Set<Role> userRoles, boolean isAdmin) {
+  private Set<Resource> getResources(Set<Role> roles, boolean isAdmin) {
     return resourceProviders.stream()
         .flatMap(
             provider -> {
               try {
-                return provider.getAllRestricted(userId, userRoles, isAdmin).stream();
+                return provider.getAllRestricted(roles, isAdmin).stream();
               } catch (ProviderException pe) {
                 throw new PermissionResolutionException(
                     String.format(

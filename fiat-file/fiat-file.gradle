@@ -20,7 +20,13 @@ dependencies {
   implementation "com.fasterxml.jackson.core:jackson-core"
   implementation "com.fasterxml.jackson.core:jackson-databind"
   implementation "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml"
-  implementation "commons-io:commons-io"
+
+  // To fix https://git.soma.netflix.com/pages/Infrastructure-Security/ast.github.io/sonatype-2018-0705.html (sonatype-2018-0705)
+  // Introduced by commons-io:commons-io via kork-bom
+  // TODO: Move to kork by upgrading the version
+  implementation "commons-io:commons-io:2.7"
+  // code-fix end
+
   implementation "org.springframework.boot:spring-boot-autoconfigure"
   implementation "org.slf4j:slf4j-api"
 

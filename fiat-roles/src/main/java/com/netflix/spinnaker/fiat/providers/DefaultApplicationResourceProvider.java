@@ -18,8 +18,10 @@ package com.netflix.spinnaker.fiat.providers;
 
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static com.netflix.spinnaker.fiat.config.ResourceProviderConfig.ApplicationProviderConfig;
 
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Streams;
 import com.netflix.spinnaker.fiat.model.resources.Application;
 import com.netflix.spinnaker.fiat.model.resources.Permissions;
@@ -30,10 +32,13 @@ import com.netflix.spinnaker.fiat.providers.internal.Front50Service;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import lombok.extern.slf4j.Slf4j;
 
+@Slf4j
 public class DefaultApplicationResourceProvider extends BaseResourceProvider<Application>
     implements ResourceProvider<Application> {
 
@@ -41,6 +46,7 @@ public class DefaultApplicationResourceProvider extends BaseResourceProvider<App
   private final ClouddriverService clouddriverService;
   private final ResourcePermissionProvider<Application> permissionProvider;
   private final FallbackPermissionsResolver executeFallbackPermissionsResolver;
+  private final ApplicationProviderConfig applicationProviderConfig;
 
   private final boolean allowAccessToUnknownApplications;
 
@@ -49,39 +55,54 @@ public class DefaultApplicationResourceProvider extends BaseResourceProvider<App
       ClouddriverService clouddriverService,
       ResourcePermissionProvider<Application> permissionProvider,
       FallbackPermissionsResolver executeFallbackPermissionsResolver,
+      ApplicationProviderConfig applicationProviderConfig,
       boolean allowAccessToUnknownApplications) {
     this.front50Service = front50Service;
     this.clouddriverService = clouddriverService;
     this.permissionProvider = permissionProvider;
     this.executeFallbackPermissionsResolver = executeFallbackPermissionsResolver;
+    this.applicationProviderConfig = applicationProviderConfig;
     this.allowAccessToUnknownApplications = allowAccessToUnknownApplications;
   }
 
   @Override
-  public Set<Application> getAllRestricted(String userId, Set<Role> userRoles, boolean isAdmin)
+  public Set<Application> getAllRestricted(Set<Role> roles, boolean isAdmin)
       throws ProviderException {
-    return getAllApplications(userId, userRoles, isAdmin, true);
+    return getAllApplications(roles, isAdmin, true);
   }
 
   @Override
   public Set<Application> getAllUnrestricted() throws ProviderException {
-    return getAllApplications(null, Collections.emptySet(), false, false);
+    return getAllApplications(Collections.emptySet(), false, false);
   }
 
   @Override
   protected Set<Application> loadAll() throws ProviderException {
     try {
-      List<Application> front50Applications = front50Service.getAllApplications();
-      List<Application> clouddriverApplications = clouddriverService.getApplications();
+      final List<Application> front50Applications = front50Service.getAllApplications();
+
+      // If enabled, load applications from Clouddriver, else use an empty list.
+      // This preserves stream concatenation logic below,
+      // ensuring that there is a non-null placeholder for Clouddriver applications.
+      final List<Application> clouddriverApplications =
+          applicationProviderConfig.getClouddriver().isLoadApplications()
+              ? clouddriverService.getApplications()
+              : Collections.emptyList();
 
       // Stream front50 first so that if there's a name collision, we'll keep that one instead of
       // the clouddriver application (since front50 might have permissions stored on it, but the
       // clouddriver version definitely won't)
-      List<Application> applications =
+      final List<Application> applications =
           Streams.concat(front50Applications.stream(), clouddriverApplications.stream())
               .filter(distinctByKey(a -> a.getName().toUpperCase()))
               // Collect to a list instead of set since we're about to modify the applications
               .collect(toImmutableList());
+
+      if (applicationProviderConfig.isSuppressDetails()) {
+        log.debug(
+            "Suppressing details for the fetched applications, excluding the following: {}",
+            applicationProviderConfig.getDetailsExcludedFromSuppression());
+      }
 
       applications.forEach(
           application -> {
@@ -92,6 +113,19 @@ public class DefaultApplicationResourceProvider extends BaseResourceProvider<App
                 executeFallbackPermissionsResolver.shouldResolve(permissions)
                     ? executeFallbackPermissionsResolver.resolve(permissions)
                     : permissions);
+
+            if (applicationProviderConfig.isSuppressDetails()) {
+              // Suppress application details to reduce the amount of data being stored
+              Map<String, Object> updatedDetails = Maps.newHashMap(application.getDetails());
+              updatedDetails
+                  .keySet()
+                  .removeIf(
+                      name ->
+                          !applicationProviderConfig
+                              .getDetailsExcludedFromSuppression()
+                              .contains(name));
+              application.setDetails(updatedDetails);
+            }
           });
 
       if (allowAccessToUnknownApplications) {
@@ -115,7 +149,7 @@ public class DefaultApplicationResourceProvider extends BaseResourceProvider<App
   }
 
   private Set<Application> getAllApplications(
-      String userId, Set<Role> userRoles, boolean isAdmin, boolean isRestricted) {
+      Set<Role> roles, boolean isAdmin, boolean isRestricted) {
     if (allowAccessToUnknownApplications) {
       /*
        * By default, the `BaseProvider` parent methods will filter out any applications that the authenticated user does
@@ -130,8 +164,6 @@ public class DefaultApplicationResourceProvider extends BaseResourceProvider<App
       return getAll();
     }
 
-    return isRestricted
-        ? super.getAllRestricted(userId, userRoles, isAdmin)
-        : super.getAllUnrestricted();
+    return isRestricted ? super.getAllRestricted(roles, isAdmin) : super.getAllUnrestricted();
   }
 }

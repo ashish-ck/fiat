@@ -47,18 +47,16 @@ class DefaultServiceAccountProviderSpec extends Specification {
     FiatRoleConfig fiatRoleConfig = Mock(FiatRoleConfig) {
       isOrMode() >> false
     }
-    DefaultServiceAccountResourceProvider provider = new DefaultServiceAccountResourceProvider(
-            front50Service, [new DefaultServiceAccountPredicateProvider(fiatRoleConfig)]
-    )
+    DefaultServiceAccountResourceProvider provider = new DefaultServiceAccountResourceProvider(front50Service, fiatRoleConfig)
 
     when:
-    def result = provider.getAllRestricted("userId", input.collect { new Role(it) } as Set, isAdmin)
+    def result = provider.getAllRestricted(input.collect { new Role(it) } as Set, isAdmin)
 
     then:
     CollectionUtils.disjunction(result, expected).isEmpty()
 
     when:
-    provider.getAllRestricted(null, null, false)
+    provider.getAllRestricted(null, false)
 
     then:
     thrown IllegalArgumentException
@@ -81,18 +79,16 @@ class DefaultServiceAccountProviderSpec extends Specification {
     FiatRoleConfig fiatRoleConfig = Mock(FiatRoleConfig) {
       isOrMode() >> true
     }
-    DefaultServiceAccountResourceProvider provider = new DefaultServiceAccountResourceProvider(
-            front50Service, [new DefaultServiceAccountPredicateProvider(fiatRoleConfig)]
-    )
+    DefaultServiceAccountResourceProvider provider = new DefaultServiceAccountResourceProvider(front50Service, fiatRoleConfig)
 
     when:
-    def result = provider.getAllRestricted("userId", input.collect { new Role(it) } as Set, isAdmin)
+    def result = provider.getAllRestricted(input.collect { new Role(it) } as Set, isAdmin)
 
     then:
     CollectionUtils.disjunction(result, expected).isEmpty()
 
     when:
-    provider.getAllRestricted(null, null, false)
+    provider.getAllRestricted(null, false)
 
     then:
     thrown IllegalArgumentException

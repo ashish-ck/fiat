@@ -16,9 +16,6 @@
 
 package com.netflix.spinnaker.fiat.model.resources
 
-import com.fasterxml.jackson.core.PrettyPrinter
-import com.fasterxml.jackson.core.util.DefaultIndenter
-import com.fasterxml.jackson.core.util.DefaultPrettyPrinter
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.netflix.spinnaker.fiat.YamlFileApplicationContextInitializer
@@ -41,15 +38,10 @@ class PermissionsSpec extends Specification {
   @Autowired
   TestConfigProps testConfigProps
 
-  // Make line endings consistent regardless of OS
-  PrettyPrinter printer =
-          new DefaultPrettyPrinter()
-                  .withObjectIndenter(new DefaultIndenter().withLinefeed("\n"))
-
   ObjectMapper mapper =
-          new ObjectMapper()
-                  .enable(SerializationFeature.INDENT_OUTPUT)
-                  .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+    new ObjectMapper()
+      .enable(SerializationFeature.INDENT_OUTPUT)
+      .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
 
   String permissionJson = '''\
     {
@@ -88,7 +80,7 @@ class PermissionsSpec extends Specification {
     b.set([(R): ["foo"], (W): ["bar"]])
 
     then:
-    permissionSerialized ==  mapper.writer(printer).writeValueAsString(b.build())
+    permissionSerialized ==  mapper.writeValueAsString(b.build())
   }
 
   def "can deserialize to builder from serialized Permissions"() {

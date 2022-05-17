@@ -35,24 +35,40 @@ dependencies {
 
   runtimeOnly "io.spinnaker.kork:kork-runtime"
 
+  // To fix https://nvd.nist.gov/vuln/detail/CVE-2021-21350
+  //        https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2021-29505
+  // Introduced by com.netflix.eureka:eureka-client via kork-eureka
+  //
+  // TODO: Move to kork
+  // when we build kork ourselves, update in spinnaker-dependencies/spinnaker-dependencies.gradle. And remove completely when
+  // https://github.com/Netflix/eureka releases a version that contains com.thoughtworks.xstream:1.4.17, and kork uses it.
+
+  // To fix https://nvd.nist.gov/vuln/detail/CVE-2019-17495
+  // Introduced by io.springfox:springfox-swagger-ui via kork-bom and kork-swagger
+  // TODO: Move to kork, update version
+
+  // To fix https://github.com/cbeust/testng/issues/2150 (sonatype-2019-0115)
+  // Introduced by org.testng used by org.codehaus.groovy:groovy-testng via kork-web
+  // TODO: Move to kork by upgrading the version of groovy and spockframework
+  constraints {
+     runtimeOnly("com.thoughtworks.xstream:xstream:1.4.17")
+
+     runtimeOnly("io.springfox:springfox-swagger-ui:2.10.0")
+
+     implementation("org.codehaus.groovy:groovy-all:3.0.8")
+     implementation("org.spockframework:spock-core:2.0-groovy-3.0")
+  } // code-fix end
+
   implementation project(':fiat-core')
   implementation project(':fiat-roles')
-  implementation project(':fiat-sql')
-
-  if (!rootProject.hasProperty("excludeSqlDrivers")) {
-    runtimeOnly(project(":fiat-sql-mysql"))
-    runtimeOnly(project(":fiat-sql-postgres"))
-  }
 
   // Add each included authz provider as a runtime dependency
   gradle.includedProviderProjects.each {
     implementation project(it)
   }
 
-  testImplementation "io.spinnaker.kork:kork-jedis"
-  testImplementation "org.testcontainers:testcontainers"
-
-  testImplementation "io.spinnaker.kork:kork-sql-test"
+  testImplementation "com.netflix.spinnaker.kork:kork-jedis"
+  testImplementation "com.netflix.spinnaker.kork:kork-jedis-test"
 }
 
 applicationName = 'fiat'

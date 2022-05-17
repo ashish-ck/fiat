@@ -1,9 +1,11 @@
 package com.netflix.spinnaker.fiat.permissions;
 
 import java.time.Duration;
+import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.NestedConfigurationProperty;
 
+@Data
 @ConfigurationProperties("fiat.redis")
 public class RedisPermissionRepositoryConfigProps {
 
@@ -11,40 +13,12 @@ public class RedisPermissionRepositoryConfigProps {
 
   @NestedConfigurationProperty private Repository repository = new Repository();
 
-  public String getPrefix() {
-    return prefix;
-  }
+  private boolean storePermissionsAsString;
 
-  public void setPrefix(String prefix) {
-    this.prefix = prefix;
-  }
-
-  public Repository getRepository() {
-    return repository;
-  }
-
-  public void setRepository(Repository repository) {
-    this.repository = repository;
-  }
-
+  @Data
   public static class Repository {
     private Duration getPermissionTimeout = Duration.ofSeconds(1);
     private Duration checkLastModifiedTimeout = Duration.ofMillis(50);
-
-    public Duration getGetPermissionTimeout() {
-      return getPermissionTimeout;
-    }
-
-    public void setGetPermissionTimeout(Duration getPermissionTimeout) {
-      this.getPermissionTimeout = getPermissionTimeout;
-    }
-
-    public Duration getCheckLastModifiedTimeout() {
-      return checkLastModifiedTimeout;
-    }
-
-    public void setCheckLastModifiedTimeout(Duration checkLastModifiedTimeout) {
-      this.checkLastModifiedTimeout = checkLastModifiedTimeout;
-    }
+    private int scanCount = 10000;
   }
 }

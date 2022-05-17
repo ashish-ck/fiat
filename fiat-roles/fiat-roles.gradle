@@ -14,6 +14,12 @@
  * limitations under the License.
  */
 
+test {
+  useJUnitPlatform {
+    includeEngines "junit-vintage", "junit-jupiter"
+  }
+}
+
 dependencies {
   implementation project(":fiat-core")
 
@@ -36,6 +42,16 @@ dependencies {
   implementation "redis.clients:jedis"
   implementation "com.google.api-client:google-api-client"
 
+  // To fix https://nvd.nist.gov/vuln/detail/CVE-2020-7692
+  // Introduced by com.google.api-client:google-api-client
+  // TODO: Move to kork
+    constraints {
+       implementation("com.google.api-client:google-api-client:1.31.0")
+       implementation("com.google.oauth-client:google-oauth-client:1.31.2")
+       implementation("com.google.guava:guava:30.0-jre") // issue with guava pom, default it switches to *-android
+    } // code-fix end
+
+  testImplementation "com.netflix.spinnaker.kork:kork-jedis-test"
   testImplementation "org.apache.commons:commons-collections4:4.1"
-  testImplementation "org.testcontainers:testcontainers"
+  testImplementation "org.junit.platform:junit-platform-runner"
 }

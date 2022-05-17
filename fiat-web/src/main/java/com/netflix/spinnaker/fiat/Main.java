@@ -23,7 +23,6 @@ import java.util.Map;
 import org.springframework.boot.actuate.autoconfigure.ldap.LdapHealthContributorAutoConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.gson.GsonAutoConfiguration;
-import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.web.servlet.support.SpringBootServletInitializer;
 import org.springframework.context.annotation.ComponentScan;
@@ -43,9 +42,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
       GsonAutoConfiguration.class,
       // Disable LDAP health check until we pull in the fix to
       // https://github.com/spring-projects/spring-ldap/issues/473
-      LdapHealthContributorAutoConfiguration.class,
-      // SQL is optional
-      DataSourceAutoConfiguration.class,
+      LdapHealthContributorAutoConfiguration.class
     })
 public class Main extends SpringBootServletInitializer {
 

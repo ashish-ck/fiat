@@ -41,15 +41,14 @@ public abstract class BaseResourceProvider<R extends Resource> implements Resour
 
   @Override
   @SuppressWarnings("unchecked")
-  public Set<R> getAllRestricted(
-      @NonNull String userId, @NonNull Set<Role> userRoles, boolean isAdmin)
+  public Set<R> getAllRestricted(@NonNull Set<Role> roles, boolean isAdmin)
       throws ProviderException {
     return (Set<R>)
         getAll().stream()
             .filter(resource -> resource instanceof Resource.AccessControlled)
             .map(resource -> (Resource.AccessControlled) resource)
             .filter(resource -> resource.getPermissions().isRestricted())
-            .filter(resource -> resource.getPermissions().isAuthorized(userRoles) || isAdmin)
+            .filter(resource -> resource.getPermissions().isAuthorized(roles) || isAdmin)
             .collect(Collectors.toSet());
   }
 

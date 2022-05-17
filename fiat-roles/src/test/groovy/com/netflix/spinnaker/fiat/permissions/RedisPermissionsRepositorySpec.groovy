@@ -27,11 +27,11 @@ import com.netflix.spinnaker.fiat.model.resources.BuildService
 import com.netflix.spinnaker.fiat.model.resources.Permissions
 import com.netflix.spinnaker.fiat.model.resources.Role
 import com.netflix.spinnaker.fiat.model.resources.ServiceAccount
+import com.netflix.spinnaker.kork.jedis.EmbeddedRedis
 import com.netflix.spinnaker.kork.jedis.JedisClientDelegate
 import com.netflix.spinnaker.kork.jedis.RedisClientDelegate
+import groovy.json.JsonBuilder
 import io.github.resilience4j.retry.RetryRegistry
-import org.testcontainers.containers.GenericContainer
-import org.testcontainers.utility.DockerImageName
 import redis.clients.jedis.Jedis
 import redis.clients.jedis.JedisPool
 import spock.lang.AutoCleanup
@@ -44,7 +44,6 @@ import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReadWriteLock
@@ -57,8 +56,8 @@ class RedisPermissionsRepositorySpec extends Specification {
   private static final String UNRESTRICTED = UnrestrictedResourceConfig.UNRESTRICTED_USERNAME
 
   @Shared
-  @AutoCleanup("stop")
-  GenericContainer embeddedRedis
+  @AutoCleanup("destroy")
+  EmbeddedRedis embeddedRedis
 
   @Shared
   ObjectMapper objectMapper = new ObjectMapper().setSerializationInclusion(JsonInclude.Include.NON_NULL)
@@ -77,12 +76,10 @@ class RedisPermissionsRepositorySpec extends Specification {
   Clock clock = new TestClock()
 
   def setupSpec() {
-    embeddedRedis = new GenericContainer(DockerImageName.parse("redis:5-alpine")).withExposedPorts(6379)
-    embeddedRedis.start()
-    def jedisPool = new JedisPool(embeddedRedis.host, embeddedRedis.getMappedPort(6379))
-    jedis = jedisPool.getResource()
+    embeddedRedis = EmbeddedRedis.embed()
+    jedis = embeddedRedis.jedis
     jedis.flushDB()
-    redisClientDelegate = new PausableRedisClientDelegate(new JedisClientDelegate(jedisPool))
+    redisClientDelegate = new PausableRedisClientDelegate(new JedisClientDelegate(embeddedRedis.pool as JedisPool))
   }
 
   private static class TestClock extends Clock {
@@ -174,7 +171,7 @@ class RedisPermissionsRepositorySpec extends Specification {
     jedis.flushDB()
   }
 
-  def "should fail if timeout is exceeded"() {
+  def "should return empty if timeout is exceeded"() {
     given:
     repo.put(new UserPermission().setId("foo"))
     def exec = Executors.newFixedThreadPool(1)
@@ -182,8 +179,9 @@ class RedisPermissionsRepositorySpec extends Specification {
 
     when:
     redisClientDelegate.pause(latch)
+    def resultValue
     def result = exec.submit {
-      repo.get("foo")
+      resultValue = repo.get("foo")
     }
 
     latch.await()
@@ -198,9 +196,7 @@ class RedisPermissionsRepositorySpec extends Specification {
     result.get()
 
     then:
-    def ex = thrown(ExecutionException)
-    ex.cause instanceof PermissionReadException
-    ex.cause.message.contains("timeout")
+    resultValue.isEmpty() == true
   }
 
   def "should set last modified for unrestricted user on save"() {
@@ -317,37 +313,7 @@ class RedisPermissionsRepositorySpec extends Specification {
     result == expected
   }
 
-    def "should put all users to redis"() {
-      setup:
-      def account1 = new Account().setName("account1")
-      def account2 = new Account().setName("account2")
-
-      def testUser1 = new UserPermission().setId("testUser1")
-              .setAccounts([account1] as Set)
-      def testUser2 = new UserPermission().setId("testUser2")
-              .setAccounts([account2] as Set)
-      def testUser3 = new UserPermission().setId("testUser3")
-              .setAdmin(true)
-
-      when:
-      repo.putAllById([
-        "testuser1": testUser1,
-        "testuser2": testUser2,
-        "testuser3": testUser3,
-      ])
-
-      then:
-      jedis.smembers("unittests:users") == ["testuser1", "testuser2", "testuser3"] as Set
-      jedis.sismember("unittests:permissions:admin", "testuser3")
-      jedis.hgetAll("unittests:permissions:testuser1:accounts") ==
-              ['account1': /{"name":"account1","permissions":$EMPTY_PERM_JSON}/.toString()]
-      jedis.hgetAll("unittests:permissions:testuser2:accounts") ==
-              ['account2': /{"name":"account2","permissions":$EMPTY_PERM_JSON}/.toString()]
-      jedis.hgetAll("unittests:permissions:testuser3:applications") == [:]
-
-    }
-
-    def "should get all users from redis"() {
+  def "should get all users from redis"() {
     setup:
     jedis.sadd("unittests:users", "testuser1", "testuser2", "testuser3")
 
@@ -432,7 +398,6 @@ class RedisPermissionsRepositorySpec extends Specification {
     def role2 = new Role("role2")
     def role3 = new Role("role3")
     def role4 = new Role("role4")
-    def role5 = new Role("role5")
 
     def acct1 = new Account().setName("acct1")
 
@@ -440,16 +405,22 @@ class RedisPermissionsRepositorySpec extends Specification {
     def user2 = new UserPermission().setId("user2").setRoles([role1, role3] as Set)
     def user3 = new UserPermission().setId("user3") // no roles.
     def user4 = new UserPermission().setId("user4").setRoles([role4] as Set)
-    def user5 = new UserPermission().setId("user5").setRoles([role5] as Set)
     def unrestricted = new UserPermission().setId(UNRESTRICTED).setAccounts([acct1] as Set)
 
-    jedis.hset("unittests:permissions:user1:roles", "role1", '{"name":"role1"}')
-    jedis.hset("unittests:permissions:user1:roles", "role2", '{"name":"role2"}')
-    jedis.hset("unittests:permissions:user2:roles", "role1", '{"name":"role1"}')
-    jedis.hset("unittests:permissions:user2:roles", "role3", '{"name":"role3"}')
-    jedis.hset("unittests:permissions:user4:roles", "role4", '{"name":"role4"}')
-    jedis.hset("unittests:permissions:user5:roles", "role5", '{"name":"role5"}')
-    jedis.hset("unittests:permissions:USER5:roles", "role5", '{"name":"role5"}')
+    if (savePermissionAsString) {
+      jedis.set("unittests:permissions:user1:roles",
+          new JsonBuilder([role1: '{"name": "role1"}', role2: '{"name": "role2"}']).toString())
+      jedis.set("unittests:permissions:user2:roles",
+          new JsonBuilder([role1: '{"name": "role1"}', 'role3': '{"name": "role3"}']).toString())
+      // keeping this a hash instead of string for cases where some permissions are hashes and others are strings
+      jedis.hset("unittests:permissions:user4:roles", "role4", '{"name":"role4"}')
+    } else {
+      jedis.hset("unittests:permissions:user1:roles", "role1", '{"name":"role1"}')
+      jedis.hset("unittests:permissions:user1:roles", "role2", '{"name":"role2"}')
+      jedis.hset("unittests:permissions:user2:roles", "role1", '{"name":"role1"}')
+      jedis.hset("unittests:permissions:user2:roles", "role3", '{"name":"role3"}')
+      jedis.hset("unittests:permissions:user4:roles", "role4", '{"name":"role4"}')
+    }
 
     jedis.hset("unittests:permissions:__unrestricted_user__:accounts", "acct1", '{"name":"acct1"}')
 
@@ -457,9 +428,8 @@ class RedisPermissionsRepositorySpec extends Specification {
     jedis.sadd("unittests:roles:role2", "user1")
     jedis.sadd("unittests:roles:role3", "user2")
     jedis.sadd("unittests:roles:role4", "user4")
-    jedis.sadd("unittests:roles:role5", "user5", "USER5")
 
-    jedis.sadd("unittests:users", "user1", "user2", "user3", "user4", "user5", "USER5", "__unrestricted_user__")
+    jedis.sadd("unittests:users", "user1", "user2", "user3", "user4", "__unrestricted_user__")
 
     when:
     def result = repo.getAllByRoles(["role1"])
@@ -485,7 +455,6 @@ class RedisPermissionsRepositorySpec extends Specification {
                "user2"       : user2.merge(unrestricted),
                "user3"       : user3.merge(unrestricted),
                "user4"       : user4.merge(unrestricted),
-               "user5"       : user5.merge(unrestricted),
                (UNRESTRICTED): unrestricted]
 
     when:
@@ -494,11 +463,64 @@ class RedisPermissionsRepositorySpec extends Specification {
     then:
     result == [(UNRESTRICTED): unrestricted]
 
+    where:
+    savePermissionAsString << [false, true]
+  }
+
+  def "should save permissions as strings when enabled"() {
+    setup:
+    def role1 = new Role("role1")
+    def role2 = new Role("role2")
+    def role3 = new Role("role3")
+
+    def acct1 = new Account().setName("acct1")
+
+    def user1 = new UserPermission().setId("user1").setRoles([role1, role2] as Set)
+    def user2 = new UserPermission().setId("user2").setRoles([role1, role3] as Set)
+    def unrestricted = new UserPermission().setId(UNRESTRICTED).setAccounts([acct1] as Set)
+
+    configProps.setStorePermissionsAsString(savePermissionAsString)
+    def expectedType = savePermissionAsString ? "string" : "hash"
+
     when:
-    result = repo.getAllByRoles(["role5"])
+    repo.put(user1)
+    repo.put(user2)
+    repo.put(unrestricted)
+    def result = repo.getAllByRoles(null)
 
     then:
-    result == ["user5"       : user5.merge(unrestricted),
+    result == ["user1"       : user1.merge(unrestricted),
+               "user2"       : user2.merge(unrestricted),
                (UNRESTRICTED): unrestricted]
+    expectedType == jedis.type("unittests:permissions:user1:roles")
+    expectedType == jedis.type("unittests:permissions:user2:roles")
+
+    // Test role update
+    when:
+    user1.setRoles([role1, role2, role3] as Set)
+    repo.put(user1)
+    result = repo.getAllByRoles(null)
+
+    then:
+    result == ["user1"       : user1.merge(unrestricted),
+               "user2"       : user2.merge(unrestricted),
+               (UNRESTRICTED): unrestricted]
+    expectedType == jedis.type("unittests:permissions:user1:roles")
+    expectedType == jedis.type("unittests:permissions:user2:roles")
+    repo.get("user1").get().getRoles() == [role1, role2, role3] as Set
+
+    // Test removal
+    when:
+    repo.remove("user1")
+    result = repo.getAllByRoles(null)
+
+    then:
+    result == ["user2"       : user2.merge(unrestricted),
+               (UNRESTRICTED): unrestricted]
+    savePermissionAsString ? "string" : "hash" == jedis.type("unittests:permissions:user2:roles")
+    assert !jedis.exists("unittests:permissions:user1:roles")
+
+    where:
+    savePermissionAsString << [false, true]
   }
 }

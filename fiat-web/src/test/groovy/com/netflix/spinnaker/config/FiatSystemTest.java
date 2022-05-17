@@ -18,7 +18,7 @@ import org.springframework.test.context.web.WebAppConfiguration;
 @Target(ElementType.TYPE)
 @Retention(RetentionPolicy.RUNTIME)
 @WebAppConfiguration()
-@TestPropertySource(properties = {"spring.config.location=classpath:fiat-test.yml"})
+@TestPropertySource("/fiat.properties")
 @DirtiesContext
 @ContextConfiguration(
     classes = {

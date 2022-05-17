@@ -21,6 +21,7 @@ import com.netflix.spectator.api.Id;
 import com.netflix.spectator.api.Registry;
 import com.netflix.spinnaker.fiat.config.ResourceProvidersHealthIndicator;
 import com.netflix.spinnaker.fiat.config.UnrestrictedResourceConfig;
+import com.netflix.spinnaker.fiat.config.UserRolesSyncerConfig;
 import com.netflix.spinnaker.fiat.model.UserPermission;
 import com.netflix.spinnaker.fiat.model.resources.Role;
 import com.netflix.spinnaker.fiat.model.resources.ServiceAccount;
@@ -31,25 +32,30 @@ import com.netflix.spinnaker.fiat.permissions.PermissionsResolver;
 import com.netflix.spinnaker.fiat.providers.ProviderException;
 import com.netflix.spinnaker.fiat.providers.ResourceProvider;
 import com.netflix.spinnaker.kork.discovery.DiscoveryStatusListener;
+import com.netflix.spinnaker.kork.jedis.RedisClientDelegate;
 import com.netflix.spinnaker.kork.lock.LockManager;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.util.backoff.BackOffExecution;
 import org.springframework.util.backoff.FixedBackOff;
+import redis.clients.jedis.commands.JedisCommands;
 
 @Slf4j
 @Component
@@ -62,15 +68,18 @@ public class UserRolesSyncer {
   private final PermissionsResolver permissionsResolver;
   private final ResourceProvider<ServiceAccount> serviceAccountProvider;
   private final ResourceProvidersHealthIndicator healthIndicator;
-
-  private final long retryIntervalMs;
-  private final long syncDelayMs;
-  private final long syncFailureDelayMs;
-  private final long syncDelayTimeoutMs;
-  private final String lockName;
+  private final RedisClientDelegate redisClientDelegate;
+  private final UserRolesSyncerConfig configurationProperties;
 
   private final Registry registry;
   private final Gauge userRolesSyncCount;
+
+  private static final String KEY_USER_ROLES = "user_roles";
+  private static final String KEY_LAST_SYNC_TIME = "last_sync_time";
+  private static final String KEY_COUNT = "count";
+
+  private static final AtomicReference<CountDownLatch> globalLatch = new AtomicReference<>(null);
+  private final AtomicReference<String> lastSyncTime = new AtomicReference<>(null);
 
   @Autowired
   public UserRolesSyncer(
@@ -81,11 +90,8 @@ public class UserRolesSyncer {
       PermissionsResolver permissionsResolver,
       ResourceProvider<ServiceAccount> serviceAccountProvider,
       ResourceProvidersHealthIndicator healthIndicator,
-      @Value("${fiat.write-mode.retry-interval-ms:10000}") long retryIntervalMs,
-      @Value("${fiat.write-mode.sync-delay-ms:600000}") long syncDelayMs,
-      @Value("${fiat.write-mode.sync-failure-delay-ms:600000}") long syncFailureDelayMs,
-      @Value("${fiat.write-mode.sync-delay-timeout-ms:30000}") long syncDelayTimeoutMs,
-      @Value("${fiat.write-mode.lock-name:}") String lockName) {
+      RedisClientDelegate redisClientDelegate,
+      UserRolesSyncerConfig configurationProperties) {
     this.discoveryStatusListener = discoveryStatusListener;
 
     this.lockManager = lockManager;
@@ -93,12 +99,8 @@ public class UserRolesSyncer {
     this.permissionsResolver = permissionsResolver;
     this.serviceAccountProvider = serviceAccountProvider;
     this.healthIndicator = healthIndicator;
-
-    this.retryIntervalMs = retryIntervalMs;
-    this.syncDelayMs = syncDelayMs;
-    this.syncFailureDelayMs = syncFailureDelayMs;
-    this.syncDelayTimeoutMs = syncDelayTimeoutMs;
-    this.lockName = lockName;
+    this.redisClientDelegate = redisClientDelegate;
+    this.configurationProperties = configurationProperties;
 
     this.registry = registry;
     this.userRolesSyncCount = registry.gauge(metricName("syncCount"));
@@ -106,29 +108,33 @@ public class UserRolesSyncer {
 
   @Scheduled(fixedDelay = 30000L)
   public void schedule() {
-    if (syncDelayMs < 0 || !discoveryStatusListener.isEnabled()) {
+    if (this.configurationProperties.getSyncDelayTimeoutMs() < 0
+        || !discoveryStatusListener.isEnabled()) {
       log.warn(
           "User roles syncing is disabled (syncDelayMs: {}, isEnabled: {})",
-          syncDelayMs,
+          this.configurationProperties.getSyncDelayMs(),
           discoveryStatusListener.isEnabled());
       return;
     }
 
     LockManager.LockOptions lockOptions =
         new LockManager.LockOptions()
-            .withLockName(
-                (lockName != null && !lockName.isEmpty())
-                    ? lockName.toLowerCase()
-                    : "Fiat.UserRolesSyncer".toLowerCase())
-            .withMaximumLockDuration(Duration.ofMillis(syncDelayMs + syncDelayTimeoutMs))
-            .withSuccessInterval(Duration.ofMillis(syncDelayMs))
-            .withFailureInterval(Duration.ofMillis(syncFailureDelayMs));
+            .withLockName("Fiat.UserRolesSyncer".toLowerCase())
+            .withMaximumLockDuration(
+                Duration.ofMillis(
+                    this.configurationProperties.getSyncDelayMs()
+                        + this.configurationProperties.getSyncDelayTimeoutMs()))
+            .withSuccessInterval(Duration.ofMillis(this.configurationProperties.getSyncDelayMs()))
+            .withFailureInterval(
+                Duration.ofMillis(this.configurationProperties.getSyncFailureDelayMs()));
 
+    // process the response
     lockManager.acquireLock(
         lockOptions,
         () -> {
           try {
             timeIt("syncTime", () -> userRolesSyncCount.set(this.syncAndReturn(new ArrayList<>())));
+            log.info("user roles synced");
           } catch (Exception e) {
             log.error("User roles synchronization failed", e);
             userRolesSyncCount.set(-1);
@@ -137,13 +143,126 @@ public class UserRolesSyncer {
   }
 
   public long syncAndReturn(List<String> roles) {
+    log.debug("Attempting to sync the following user roles: {}", roles);
+    if (this.configurationProperties.getSynchronization().isEnabled()) {
+      log.info("since synchronization is enabled, forcing a sync of all user roles");
+      return doSynchronizedUserRolesSync(new ArrayList<>());
+    } else {
+      return syncUserRoles(roles);
+    }
+  }
+
+  private long doSynchronizedUserRolesSync(List<String> roles) {
+    // this is the timestamp at which a thread attempts to refresh
+    long syncAttemptTime = System.currentTimeMillis();
+    log.debug("Attempting to sync user roles at: {}", new Date(syncAttemptTime));
+
+    LockManager.LockOptions lockOptions =
+        new LockManager.LockOptions()
+            .withLockName("Fiat.UserRolesSyncer.Synchronize".toLowerCase())
+            .withMaximumLockDuration(
+                Duration.ofMillis(
+                    this.configurationProperties.getSynchronization().getMaxLockDurationMs()))
+            .withSuccessInterval(
+                Duration.ofMillis(
+                    this.configurationProperties.getSynchronization().getSyncDelayMs()))
+            .withFailureInterval(
+                Duration.ofMillis(
+                    this.configurationProperties.getSynchronization().getSyncFailureDelayMs()));
+
+    long count;
+    while (true) {
+      boolean isSyncAllowed = false; // flag to control which thread can attempt a sync
+      // since countdown latches can't be reset, we keep a pointer to a global latch so that others
+      // can wait on it
+      CountDownLatch localLatch;
+      synchronized (this) {
+        if (globalLatch.get() == null) {
+          isSyncAllowed = true;
+          globalLatch.set(new CountDownLatch(1));
+        }
+        localLatch = globalLatch.get();
+      }
+
+      if (isSyncAllowed) {
+        try {
+          // acquire redis lock to sync across fiat pods
+          LockManager.AcquireLockResponse<Long> acquireLockResponse =
+              lockManager.acquireLock(
+                  lockOptions,
+                  () -> {
+                    //
+                    if (lastSyncTime.get() != null
+                        && Long.parseLong(lastSyncTime.get()) > syncAttemptTime) {
+                      log.info(
+                          "Not syncing since user roles lastSyncTime: {} is later than this thread's syncAttemptTime: {}",
+                          new Date(Long.parseLong(lastSyncTime.get())),
+                          new Date(syncAttemptTime));
+                      // get the most recent count value
+                      String lastKnownSyncCount =
+                          redisClientDelegate.withCommandsClient(
+                              (Function<JedisCommands, String>) c -> c.get(userRolesCountKey()));
+                      return Long.parseLong(lastKnownSyncCount);
+                    }
+                    return syncUserRoles(roles);
+                  });
+
+          // update in-mem last sync time by getting the most recent value
+          String redisSyncTime =
+              redisClientDelegate.withCommandsClient(
+                  (Function<JedisCommands, String>) c -> c.get(userRolesLastSyncTimeKey()));
+          log.debug("obtained the following lastSyncTime from redis: {}", redisSyncTime);
+          this.lastSyncTime.set(redisSyncTime);
+
+          if (acquireLockResponse != null && acquireLockResponse.isReleased()) {
+            count = acquireLockResponse.getOnLockAcquiredCallbackResult();
+            break;
+          }
+        } catch (Exception e) {
+          log.warn("syncing user roles failed", e);
+        } finally {
+          synchronized (this) {
+            localLatch.countDown(); // release all other threads waiting on this one
+            globalLatch.set(null);
+          }
+        }
+      } else {
+        try {
+          localLatch.await(); // all other threads will be waiting here
+
+        } catch (Exception e) {
+          log.warn("current thread was interrupted while waiting to obtain the latch", e);
+        }
+      }
+
+      if (lastSyncTime.get() != null && Long.parseLong(lastSyncTime.get()) > syncAttemptTime) {
+        log.info(
+            "Not syncing since user roles lastSyncTime: {} is later than this thread's syncAttemptTime: {}",
+            new Date(Long.parseLong(lastSyncTime.get())),
+            new Date(syncAttemptTime));
+        // get the most recent count value
+        String lastKnownSyncCount =
+            redisClientDelegate.withCommandsClient(
+                (Function<JedisCommands, String>) c -> c.get(userRolesCountKey()));
+        return Long.parseLong(lastKnownSyncCount);
+      }
+    }
+    return count;
+  }
+
+  private long syncUserRoles(List<String> roles) {
     FixedBackOff backoff = new FixedBackOff();
-    backoff.setInterval(retryIntervalMs);
-    backoff.setMaxAttempts(Math.floorDiv(syncDelayTimeoutMs, retryIntervalMs) + 1);
+    backoff.setInterval(this.configurationProperties.getRetryIntervalMs());
+    backoff.setMaxAttempts(
+        Math.floorDiv(
+                this.configurationProperties.getSyncDelayTimeoutMs(),
+                this.configurationProperties.getRetryIntervalMs())
+            + 1);
     BackOffExecution backOffExec = backoff.start();
 
     // after this point the execution will get rescheduled
-    final long timeout = System.currentTimeMillis() + syncDelayTimeoutMs;
+    final long timeout =
+        System.currentTimeMillis() + this.configurationProperties.getSyncDelayTimeoutMs();
 
     if (!isServerHealthy()) {
       log.warn(
@@ -177,7 +296,7 @@ public class UserRolesSyncer {
         if (waitTime == BackOffExecution.STOP || System.currentTimeMillis() > timeout) {
           String cause = (waitTime == BackOffExecution.STOP) ? "backoff-exhausted" : "timeout";
           registry.counter("syncAborted", "cause", cause).increment();
-          log.error("Unable to resolve service account permissions.", ex);
+          log.error("sync aborted as backoff is exhausted or the timeout is exceeded", ex);
           return 0;
         }
         String message =
@@ -218,9 +337,14 @@ public class UserRolesSyncer {
       return allServiceAccounts.stream()
           .collect(Collectors.toMap(UserPermission::getId, Function.identity()));
     } else {
-      return allServiceAccounts.stream()
-          .filter(p -> p.getRoles().stream().map(Role::getName).anyMatch(roles::contains))
-          .collect(Collectors.toMap(UserPermission::getId, Function.identity()));
+      Map<String, UserPermission> filteredServiceAccounts =
+          allServiceAccounts.stream()
+              .filter(p -> p.getRoles().stream().map(Role::getName).anyMatch(roles::contains))
+              .collect(Collectors.toMap(UserPermission::getId, Function.identity()));
+
+      log.debug(
+          "found {} service accounts that match roles: {}", filteredServiceAccounts.size(), roles);
+      return filteredServiceAccounts;
     }
   }
 
@@ -233,6 +357,7 @@ public class UserRolesSyncer {
   }
 
   public long updateUserPermissions(Map<String, UserPermission> permissionsById) {
+    log.debug("updating permissions for {} users", permissionsById.size());
     if (permissionsById.remove(UnrestrictedResourceConfig.UNRESTRICTED_USERNAME) != null) {
       timeIt(
           "syncAnonymous",
@@ -254,21 +379,38 @@ public class UserRolesSyncer {
                                 .collect(Collectors.toList())))
             .collect(Collectors.toList());
 
+    long syncTime = System.currentTimeMillis();
+
+    long count = 0;
     if (extUsers.isEmpty()) {
       log.info("Found no non-anonymous user roles to sync.");
-      return 0;
+    } else {
+      count =
+          timeIt(
+              "syncUsers",
+              () -> {
+                Collection<UserPermission> values = permissionsResolver.resolve(extUsers).values();
+                values.forEach(permissionsRepository::put);
+                return values.size();
+              });
     }
 
-    long count =
-        timeIt(
-            "syncUsers",
-            () -> {
-              Map<String, UserPermission> values = permissionsResolver.resolve(extUsers);
-              permissionsRepository.putAllById(values);
-              return values.size();
-            });
-    log.info("Synced {} non-anonymous user roles.", count);
-    return count;
+    redisClientDelegate.withCommandsClient(
+        c -> {
+          log.debug("setting last sync time for user roles to {}", syncTime);
+          c.set(userRolesLastSyncTimeKey(), String.valueOf(syncTime));
+        });
+    this.lastSyncTime.set(String.valueOf(syncTime));
+
+    long finalCount = count;
+    redisClientDelegate.withCommandsClient(
+        c -> {
+          log.debug("setting count for user roles to {}", finalCount);
+          c.set(userRolesCountKey(), String.valueOf(finalCount));
+        });
+
+    log.info("Synced {} non-anonymous user roles.", finalCount);
+    return finalCount;
   }
 
   private static String metricName(String name) {
@@ -302,5 +444,19 @@ public class UserRolesSyncer {
           .timer(success ? timer : timer.withTag("cause", cause))
           .record(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
     }
+  }
+
+  private String userRolesLastSyncTimeKey() {
+    return String.format(
+        "%s:%s:%s",
+        this.configurationProperties.getSynchronization().getPrefix(),
+        KEY_USER_ROLES,
+        KEY_LAST_SYNC_TIME);
+  }
+
+  private String userRolesCountKey() {
+    return String.format(
+        "%s:%s:%s",
+        this.configurationProperties.getSynchronization().getPrefix(), KEY_USER_ROLES, KEY_COUNT);
   }
 }
